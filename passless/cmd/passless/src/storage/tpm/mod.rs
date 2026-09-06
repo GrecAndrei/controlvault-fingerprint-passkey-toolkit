@@ -36,7 +36,7 @@ use tss_esapi::Context;
 use tss_esapi::structures::{
     PublicKeyRsa, PublicRsaParametersBuilder, RsaExponent, RsaScheme, SymmetricDefinitionObject,
 };
-use tss_esapi::traits::{Marshall, UnMarshall};
+use tss_esapi::traits::UnMarshall;
 use tss_esapi::tss2_esys::{TPM2B_PRIVATE, TPM2B_PUBLIC};
 use zeroize::Zeroizing;
 
@@ -52,6 +52,12 @@ pub struct TpmStorageAdapter {
     iteration_index: usize,
     iteration_entries: Vec<PathBuf>,
     context: Mutex<Context>,
+    /// Cached legacy sealing parent. Creating the RSA parent is expensive on
+    /// hardware TPMs, so keep it loaded for the lifetime of the service.
+    /// The context owns the handle and flushes it during shutdown.
+    sealing_parent: Mutex<Option<tss_esapi::handles::KeyHandle>>,
+    /// Unsealed shared AES key retained in protected process memory.
+    master_key: Mutex<Option<Zeroizing<Vec<u8>>>>,
     portable: bool,
 }
 
@@ -77,6 +83,16 @@ pub(crate) struct SealedBlob {
     /// The public part of the TPM-sealed encryption key
     pub(crate) tpm_public: Vec<u8>,
 }
+
+/// TPM object metadata for the shared storage encryption key.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SealedStorageKey {
+    tpm_private: Vec<u8>,
+    tpm_public: Vec<u8>,
+}
+
+const SHARED_KEY_MODE: &str = "shared-key-v1";
+const STORAGE_KEY_FILENAME: &str = "storage_key.tpm";
 
 /// COSE algorithm identifier for ES256 (ECDSA w/ SHA-256)
 const COSE_ALG_ES256: i32 = -7;
@@ -290,10 +306,31 @@ impl TpmStorageAdapter {
             iteration_index: 0,
             iteration_entries: Vec::new(),
             context: Mutex::new(context),
+            sealing_parent: Mutex::new(None),
+            master_key: Mutex::new(None),
             portable: false,
         };
 
         Ok(adapter)
+    }
+
+    /// Initialize the shared storage key before the authenticator is exposed.
+    /// The first creation may be slow on a hardware TPM, so callers should do
+    /// this during service startup rather than inside a browser CTAP request.
+    pub fn initialize_master_key(&self) -> Result<()> {
+        self.warm_sealing_parent()?;
+        self.ensure_master_key()
+    }
+
+    fn warm_sealing_parent(&self) -> Result<()> {
+        if self.portable {
+            return Ok(());
+        }
+
+        let mut context = self.context.lock().map_err(|_| soft_fido2::Error::Other)?;
+        let _ = self.sealing_parent_handle(&mut context)?;
+        info!("TPM sealing parent warmed and retained for this service");
+        Ok(())
     }
 
     /// Create a new TPM storage adapter in portable mode.
@@ -382,7 +419,17 @@ impl TpmStorageAdapter {
 
             Ok(tss_esapi::handles::KeyHandle::from(persistent_handle))
         } else {
-            self.create_primary_key(context)
+            let mut cached = self
+                .sealing_parent
+                .lock()
+                .map_err(|_| soft_fido2::Error::Other)?;
+            if let Some(handle) = *cached {
+                return Ok(handle);
+            }
+
+            let handle = self.create_primary_key(context)?;
+            *cached = Some(handle);
+            Ok(handle)
         }
     }
 
@@ -418,35 +465,13 @@ impl TpmStorageAdapter {
             })
     }
 
-    /// Seal data using TPM with hybrid encryption
-    ///
-    /// Uses AES-256-GCM to encrypt the data, then seals only the encryption key with TPM.
-    /// This avoids TPM size limits on sealed data (typically 128 bytes).
-    ///
-    /// The `aad` parameter provides additional authenticated data bound into the AES-GCM
-    /// ciphertext. For the portable path, callers pass credential-specific AAD (cred ID,
-    /// RP ID, algorithm, provider version); the TPM public blob is appended internally.
-    /// For the legacy path, pass an empty slice.
-    pub fn seal_data(&self, data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
-        debug!("Sealing {} bytes with TPM (hybrid encryption)", data.len());
-
-        let mut aes_key = [0u8; 32];
-        OsRng.fill_bytes(&mut aes_key);
-
-        let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
-
-        let mut context = self.context.lock().map_err(|e| {
-            log::error!("Failed to lock TPM context: {}", e);
-            soft_fido2::Error::Other
-        })?;
-
+    fn seal_key(&self, key: &[u8]) -> Result<SealedStorageKey> {
+        let mut context = self.context.lock().map_err(|_| soft_fido2::Error::Other)?;
         let parent_key = self.sealing_parent_handle(&mut context)?;
         let sealing_pub = self.create_sealing_public()?;
-
-        let sensitive_data = tss_esapi::structures::SensitiveData::try_from(aes_key.to_vec())
-            .map_err(|e| {
-                log::error!("Failed to create sensitive data for AES key: {}", e);
+        let sensitive_data =
+            tss_esapi::structures::SensitiveData::try_from(key.to_vec()).map_err(|e| {
+                log::error!("Failed to create sensitive data for storage key: {}", e);
                 soft_fido2::Error::Other
             })?;
 
@@ -460,43 +485,150 @@ impl TpmStorageAdapter {
                 None,
             )
             .map_err(|e| {
-                log::error!("Failed to create sealed object: {}", e);
+                log::error!("Failed to create shared storage key object: {}", e);
                 soft_fido2::Error::Other
             })?;
-
-        if !self.portable {
-            context.flush_context(parent_key.into()).map_err(|e| {
-                log::error!("Failed to flush parent key: {}", e);
-                soft_fido2::Error::Other
-            })?;
-        }
 
         let private_tpm: TPM2B_PRIVATE = create_result.out_private.into();
         let private_bytes = private_tpm.buffer[..private_tpm.size as usize].to_vec();
-
-        let public_bytes = if self.portable {
-            create_result.out_public.marshall().map_err(|e| {
-                log::error!("Failed to marshall public area: {}", e);
-                soft_fido2::Error::Other
-            })?
-        } else {
-            #[allow(clippy::unnecessary_fallible_conversions)]
-            let public_tpm: TPM2B_PUBLIC = create_result.out_public.try_into().map_err(|e| {
-                log::error!("Failed to convert public to TPM2B: {:?}", e);
-                soft_fido2::Error::Other
-            })?;
-
-            unsafe {
-                let ptr = &public_tpm as *const TPM2B_PUBLIC as *const u8;
-                std::slice::from_raw_parts(ptr, std::mem::size_of::<TPM2B_PUBLIC>()).to_vec()
-            }
+        let public_tpm: TPM2B_PUBLIC = create_result.out_public.try_into().map_err(|e| {
+            log::error!("Failed to convert storage key public area: {:?}", e);
+            soft_fido2::Error::Other
+        })?;
+        let public_bytes = unsafe {
+            let ptr = &public_tpm as *const TPM2B_PUBLIC as *const u8;
+            std::slice::from_raw_parts(ptr, std::mem::size_of::<TPM2B_PUBLIC>()).to_vec()
         };
 
-        let mut full_aad = Vec::with_capacity(aad.len() + public_bytes.len());
-        full_aad.extend_from_slice(aad);
-        full_aad.extend_from_slice(&public_bytes);
+        Ok(SealedStorageKey {
+            tpm_private: private_bytes,
+            tpm_public: public_bytes,
+        })
+    }
 
-        let encrypted_data = aes_gcm_encrypt_with_aad(&aes_key, &nonce_bytes, data, &full_aad)?;
+    fn unseal_key(&self, sealed: &SealedStorageKey) -> Result<Zeroizing<Vec<u8>>> {
+        let mut context = self.context.lock().map_err(|_| soft_fido2::Error::Other)?;
+        let parent_key = self.sealing_parent_handle(&mut context)?;
+        let mut private_tpm = TPM2B_PRIVATE {
+            size: sealed.tpm_private.len() as u16,
+            buffer: [0u8; 1550],
+        };
+        if sealed.tpm_private.len() > private_tpm.buffer.len() {
+            return Err(soft_fido2::Error::Other);
+        }
+        private_tpm.buffer[..sealed.tpm_private.len()].copy_from_slice(&sealed.tpm_private);
+        let private = tss_esapi::structures::Private::try_from(private_tpm).map_err(|e| {
+            log::error!("Failed to convert shared storage private area: {}", e);
+            soft_fido2::Error::Other
+        })?;
+
+        let public_tpm: TPM2B_PUBLIC = unsafe {
+            let mut public_struct: TPM2B_PUBLIC = std::mem::zeroed();
+            let ptr = &mut public_struct as *mut TPM2B_PUBLIC as *mut u8;
+            std::ptr::copy_nonoverlapping(
+                sealed.tpm_public.as_ptr(),
+                ptr,
+                std::cmp::min(sealed.tpm_public.len(), std::mem::size_of::<TPM2B_PUBLIC>()),
+            );
+            public_struct
+        };
+        let public = tss_esapi::structures::Public::try_from(public_tpm).map_err(|e| {
+            log::error!("Failed to convert shared storage public area: {}", e);
+            soft_fido2::Error::Other
+        })?;
+        let sealed_handle = context.load(parent_key, private, public).map_err(|e| {
+            log::error!("Failed to load shared storage key: {}", e);
+            soft_fido2::Error::Other
+        })?;
+        let unsealed = context.unseal(sealed_handle.into()).map_err(|e| {
+            log::error!("Failed to unseal shared storage key: {}", e);
+            soft_fido2::Error::Other
+        })?;
+        context.flush_context(sealed_handle.into()).map_err(|e| {
+            log::error!("Failed to flush shared storage key handle: {}", e);
+            soft_fido2::Error::Other
+        })?;
+
+        let key = unsealed.value().to_vec();
+        if key.len() != 32 {
+            log::error!("Shared storage key has wrong size: {}", key.len());
+            return Err(soft_fido2::Error::Other);
+        }
+        Ok(Zeroizing::new(key))
+    }
+
+    fn ensure_master_key(&self) -> Result<()> {
+        if self.portable {
+            return Ok(());
+        }
+        if self
+            .master_key
+            .lock()
+            .map_err(|_| soft_fido2::Error::Other)?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let path = self.storage_dir.join(STORAGE_KEY_FILENAME);
+        let key = if path.exists() {
+            let bytes = std::fs::read(&path).map_err(|e| {
+                log::error!("Failed to read shared storage key: {}", e);
+                soft_fido2::Error::Other
+            })?;
+            let sealed: SealedStorageKey = serde_json::from_slice(&bytes).map_err(|e| {
+                log::error!("Failed to parse shared storage key: {}", e);
+                soft_fido2::Error::Other
+            })?;
+            self.unseal_key(&sealed)?
+        } else {
+            let mut raw = vec![0u8; 32];
+            OsRng.fill_bytes(&mut raw);
+            let sealed = self.seal_key(&raw)?;
+            let bytes = serde_json::to_vec(&sealed).map_err(|e| {
+                log::error!("Failed to serialize shared storage key: {}", e);
+                soft_fido2::Error::Other
+            })?;
+            atomic_write_in_dir(&self.storage_dir, STORAGE_KEY_FILENAME, &bytes).map_err(|e| {
+                log::error!("Failed to persist shared storage key: {}", e);
+                soft_fido2::Error::Other
+            })?;
+            Zeroizing::new(raw)
+        };
+
+        *self
+            .master_key
+            .lock()
+            .map_err(|_| soft_fido2::Error::Other)? = Some(key);
+        info!("TPM-backed shared storage key ready");
+        Ok(())
+    }
+
+    /// Seal data using TPM with hybrid encryption
+    ///
+    /// Uses AES-256-GCM with a single TPM-sealed storage key. The key is
+    /// created/unsealed during service startup, avoiding a slow TPM object
+    /// creation inside each browser CTAP request.
+    ///
+    /// The `aad` parameter provides additional authenticated data bound into the AES-GCM
+    /// ciphertext. For the portable path, callers pass credential-specific AAD (cred ID,
+    /// RP ID, algorithm, provider version); the TPM public blob is appended internally.
+    /// For the legacy path, pass an empty slice.
+    pub fn seal_data(&self, data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+        debug!("Sealing {} bytes with TPM-backed shared key", data.len());
+        self.ensure_master_key()?;
+
+        let key_guard = self
+            .master_key
+            .lock()
+            .map_err(|_| soft_fido2::Error::Other)?;
+        let key = key_guard.as_ref().ok_or(soft_fido2::Error::Other)?;
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let mut full_aad = Vec::with_capacity(aad.len() + SHARED_KEY_MODE.len());
+        full_aad.extend_from_slice(SHARED_KEY_MODE.as_bytes());
+        full_aad.extend_from_slice(aad);
+        let encrypted_data = aes_gcm_encrypt_with_aad(key, &nonce_bytes, data, &full_aad)?;
 
         debug!(
             "Encrypted {} bytes to {} bytes with AAD ({} bytes)",
@@ -506,11 +638,11 @@ impl TpmStorageAdapter {
         );
 
         let sealed_blob = SealedBlob {
-            mode: None,
+            mode: Some(SHARED_KEY_MODE.to_string()),
             encrypted_data,
             nonce: nonce_bytes.to_vec(),
-            tpm_private: private_bytes,
-            tpm_public: public_bytes,
+            tpm_private: Vec::new(),
+            tpm_public: Vec::new(),
         };
 
         let serialized = Zeroizing::new(serde_json::to_vec(&sealed_blob).map_err(|e| {
@@ -531,13 +663,31 @@ impl TpmStorageAdapter {
     pub fn unseal_data(&self, sealed_data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         debug!("Unsealing data with TPM (hybrid decryption)");
 
-        let mut context = self.context.lock().map_err(|e| {
-            log::error!("Failed to lock TPM context: {}", e);
+        let sealed_blob: SealedBlob = serde_json::from_slice(sealed_data).map_err(|e| {
+            log::error!("Failed to deserialize sealed blob: {}", e);
             soft_fido2::Error::Other
         })?;
 
-        let sealed_blob: SealedBlob = serde_json::from_slice(sealed_data).map_err(|e| {
-            log::error!("Failed to deserialize sealed blob: {}", e);
+        if sealed_blob.mode.as_deref() == Some(SHARED_KEY_MODE) {
+            self.ensure_master_key()?;
+            let key_guard = self
+                .master_key
+                .lock()
+                .map_err(|_| soft_fido2::Error::Other)?;
+            let key = key_guard.as_ref().ok_or(soft_fido2::Error::Other)?;
+            let mut full_aad = Vec::with_capacity(aad.len() + SHARED_KEY_MODE.len());
+            full_aad.extend_from_slice(SHARED_KEY_MODE.as_bytes());
+            full_aad.extend_from_slice(aad);
+            return aes_gcm_decrypt_with_aad(
+                key,
+                &sealed_blob.nonce,
+                &sealed_blob.encrypted_data,
+                &full_aad,
+            );
+        }
+
+        let mut context = self.context.lock().map_err(|e| {
+            log::error!("Failed to lock TPM context: {}", e);
             soft_fido2::Error::Other
         })?;
 
@@ -595,13 +745,6 @@ impl TpmStorageAdapter {
             log::error!("Failed to flush sealed handle: {}", e);
             soft_fido2::Error::Other
         })?;
-
-        if !self.portable {
-            context.flush_context(parent_key.into()).map_err(|e| {
-                log::error!("Failed to flush parent key: {}", e);
-                soft_fido2::Error::Other
-            })?;
-        }
 
         drop(context);
 

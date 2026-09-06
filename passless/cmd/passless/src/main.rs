@@ -152,6 +152,16 @@ impl<
             soft_fido2_transport::Error::Other("Command failed".to_string())
         })?;
 
+        if let Some(&status) = response.first()
+            && status != 0
+        {
+            error!(
+                "CTAP command returned status 0x{:02x} (response_len={})",
+                status,
+                response.len()
+            );
+        }
+
         debug!("CTAP response: {} bytes", response.len());
         Ok(response)
     }
@@ -696,6 +706,7 @@ fn run() -> Result<()> {
                             Some(tcti.clone()),
                             allow_storage_creation,
                         )?;
+                        storage.initialize_master_key()?;
                         let boxed: Box<dyn CredentialStorage> = Box::new(storage);
                         let shared_storage = Arc::new(Mutex::new(boxed));
                         let pin_storage = TpmPinStorage::new(path.into(), Some(tcti));
@@ -870,6 +881,7 @@ fn run() -> Result<()> {
                         Some(tcti.clone()),
                         allow_storage_creation,
                     )?;
+                    storage.initialize_master_key()?;
                     let pin_storage = TpmPinStorage::new(path.into(), Some(tcti));
                     let pin_storage = Arc::new(Mutex::new(pin_storage));
                     let service = AuthenticatorService::with_pin_storage(

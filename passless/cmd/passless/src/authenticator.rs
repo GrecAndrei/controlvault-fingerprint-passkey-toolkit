@@ -448,7 +448,15 @@ impl<S: CredentialStorage, P: PinStorage> AuthenticatorCallbacks for PasslessCal
             }
         };
 
-        storage.write(*credential)?;
+        if let Err(error) = storage.write(*credential) {
+            error!(
+                "Credential persistence failed for RP {} (id={}): {:?}",
+                credential.rp_id,
+                bytes_to_hex(credential.id),
+                error
+            );
+            return Err(error);
+        }
         info!(
             "Credential persisted successfully for RP: {}",
             credential.rp_id

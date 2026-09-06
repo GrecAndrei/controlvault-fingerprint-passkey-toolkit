@@ -39,6 +39,13 @@ Some ControlVault 3 readers stop enrolling or verifying because the Linux TOD st
 
 The profile enables `fingerprint_verification = true`. Non-match, timeout, unavailable sensor, and helper errors deny user verification; no notification fallback is used. CTAP user-presence consent remains a separate policy step.
 
+The TPM backend warms its parent key and creates/loads one TPM-sealed AES-256-GCM
+storage key during service startup. Credential registration then performs only local
+authenticated encryption and an atomic `0600` file write, keeping the CTAP response
+inside Chromium's request deadline. The sealed key is stored as
+`~/.local/share/passless/tpm/storage_key.tpm`; it is machine-local state and must not
+be copied into source control or shared with another TPM.
+
 ## Reproducibility and safety
 
 - No captured biometric data, enrollment templates, TPM material, private keys, or host configuration are included.

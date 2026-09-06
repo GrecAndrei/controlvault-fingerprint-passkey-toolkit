@@ -195,6 +195,12 @@ which seals credentials to the TPM hardware. The experimental
 the TPM and never exposed to host memory, and credential blobs can be synchronized across
 multiple TPMs provisioned from the same recovery seed.
 
+The legacy TPM backend warms its parent during startup and keeps a single AES-256-GCM
+storage key sealed by that parent. Each credential record is encrypted with a fresh nonce
+and written atomically, avoiding a slow TPM object-creation round trip during the browser's
+CTAP request. The sealed key lives at `storage_key.tpm` beside the credential directory and
+is machine-local; never commit it or copy it to another TPM.
+
 ## Configuration
 
 Passless can be configured using a TOML configuration file. By default, the configuration file is
