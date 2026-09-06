@@ -190,7 +190,11 @@ fn validate_existing_dir(path: &Path, require_private: bool) -> io::Result<()> {
         ));
     }
     let uid = current_uid();
-    if stat.st_uid != uid && stat.st_uid != 0 {
+    // Ancestors such as /home can legitimately be owned by a mapped host UID
+    // inside a user namespace.  They are safe to traverse when they are not
+    // writable by group or other users.  The final credential directory,
+    // however, remains private and must belong to this user or root.
+    if require_private && stat.st_uid != uid && stat.st_uid != 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             format!(
