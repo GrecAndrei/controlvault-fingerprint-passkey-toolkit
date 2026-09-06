@@ -9,3 +9,11 @@ This bundle was assembled from the locally validated deployments on 2026-09-06 (
 | ControlVault firmware controller | `c8cca3ff655283b5ce0d58635b4bc2bab8f9d128` |
 
 The deployment used Broadcom TOD 5.15.021.0, libfprint-tod 1.95.2, and a Dell Latitude 7400 reader identified as USB `0a5c:5843`. Proprietary driver/firmware payloads, TPM state, enrolled biometric data, and machine-specific logs are intentionally not part of this repository.
+
+## Licensing
+
+The toolkit is distributed under GPL-3.0-or-later; see [`LICENSE`](LICENSE).
+The complete GPLv3 text for the bundled Passless component is retained in
+[`passless/LICENSE`](passless/LICENSE). The source revisions above preserve
+provenance for the component material; proprietary vendor binaries and firmware
+are excluded.

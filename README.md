@@ -59,4 +59,7 @@ This is a compatibility and integration toolkit, not replacement firmware and no
 
 ## License
 
-The passkey component retains its upstream GPLv3 license in [`passless/LICENSE`](passless/LICENSE). The shim and ControlVault tooling are included as source from the local deployment; no separate license notice was present in those original component repositories, so check with the author before redistributing those two components.
+This repository is licensed under **GPL-3.0-or-later**; see [`LICENSE`](LICENSE).
+The bundled Passless component retains its GPLv3 license text in
+[`passless/LICENSE`](passless/LICENSE). Source provenance and third-party
+attribution are recorded in [`SOURCES.md`](SOURCES.md).
