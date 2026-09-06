@@ -1,0 +1,25 @@
+# Latitude 7400 local passkey authenticator profile.
+backend_type = "tpm"
+verbose = false
+
+[tpm]
+tcti = "device:/dev/tpmrm0"
+portable = false
+
+[security]
+check_mlock = true
+disable_core_dumps = true
+constant_signature_counter = false
+enable_credential_backup = false
+always_uv = true
+user_verification_registration = true
+user_verification_authentication = true
+fingerprint_verification = true
+notification_timeout = 45
+
+[pin]
+enforcement = "optional"
+min_length = 6
+max_retries = 8
+max_uv_retries = 8
+auto_lock_timeout = 0

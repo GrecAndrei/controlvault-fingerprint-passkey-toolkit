@@ -1,0 +1,5 @@
+# The active desktop user may create the virtual authenticator. The groups make
+# this work in non-logind sessions after the next login as well.
+KERNEL=="uhid", SUBSYSTEM=="misc", GROUP="fido", MODE="0660", TAG+="uaccess"
+KERNEL=="tpmrm*", SUBSYSTEM=="tpmrm", GROUP="tss", MODE="0660", TAG+="uaccess"
+

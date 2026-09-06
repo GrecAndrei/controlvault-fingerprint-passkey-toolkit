@@ -1,0 +1,6 @@
+*.so
+tests/test_shim
+tools/sync_probe
+*.log
+backups/
+

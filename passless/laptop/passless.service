@@ -1,0 +1,33 @@
+[Unit]
+Description=Local TPM-backed WebAuthn passkey authenticator
+Documentation=https://github.com/pando85/passless
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/passless --config-path %h/.config/passless/config.toml
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+LimitMEMLOCK=16M
+NoNewPrivileges=true
+PrivateTmp=true
+RuntimeDirectory=passless
+RuntimeDirectoryMode=0700
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%t/passless %h/.config/passless %h/.local/share/passless
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_LOCAL AF_NETLINK
+SystemCallArchitectures=native
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

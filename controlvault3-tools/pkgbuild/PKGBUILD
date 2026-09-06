@@ -1,0 +1,37 @@
+# Maintainer: Matthias Paulsson
+pkgname=controlvault3-tools-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc="Userspace research tools for Broadcom/Dell ControlVault 3 USB devices"
+arch=('any')
+url="https://github.com/YOURUSER/controlvault3-tools"
+license=('MIT')
+depends=('python' 'python-pyusb' 'usbutils' 'pcsclite' 'ccid')
+makedepends=('git')
+optdepends=(
+  'wireshark-cli: USB capture with tshark'
+  'opensc: smartcard inspection'
+  'pcsc-tools: pcsc_scan'
+)
+source=('git+https://github.com/YOURUSER/controlvault3-tools.git')
+sha256sums=('SKIP')
+
+pkgver() {
+  cd controlvault3-tools
+  git describe --long --tags --always | sed 's/^v//;s/-/.r/;s/-/./'
+}
+
+package() {
+  cd controlvault3-tools
+
+  install -Dm755 cv3_probe.py "$pkgdir/usr/bin/cv3-probe"
+  install -Dm755 cv3_vendor_probe.py "$pkgdir/usr/bin/cv3-vendor-probe"
+  install -Dm755 listen.py "$pkgdir/usr/bin/cv3-listen"
+  install -Dm755 bulk_listen.py "$pkgdir/usr/bin/cv3-bulk-listen"
+  install -Dm755 std_probe.py "$pkgdir/usr/bin/cv3-std-probe"
+  install -Dm755 descriptor_fuzz_safe.py "$pkgdir/usr/bin/cv3-descriptor-probe"
+
+  install -Dm644 README.md "$pkgdir/usr/share/doc/controlvault3-tools/README.md"
+  install -Dm644 notes.md "$pkgdir/usr/share/doc/controlvault3-tools/notes.md"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

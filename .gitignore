@@ -1,0 +1,22 @@
+# Build products and local state
+target/
+**/target/
+*.so
+*.o
+*.pyc
+__pycache__/
+.venv/
+captures/
+*.log
+
+# Local secrets and credentials
+.env*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Host-specific deployment state
+.debug/
+.playwright-mcp/
+backups/
