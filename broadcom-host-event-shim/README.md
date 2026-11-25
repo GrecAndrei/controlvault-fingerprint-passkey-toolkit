@@ -67,3 +67,14 @@ observed on the reference Latitude after restarting the service.
 This is a narrow compatibility shim, not replacement firmware. Firmware writes
 remain intentionally out of scope because the controller accepts only signed,
 customer-matched images and a failed update can brick the security controller.
+
+## Ubuntu compatibility
+
+The shim has been successfully built on Ubuntu 26.04 LTS,
+with fingerprint enrollment reported working on a Dell
+Latitude 5320 equipped with the Broadcom ControlVault 3
+reader (`0a5c:5843`).
+
+Ubuntu-specific installation instructions, compatibility
+information, testing, and rollback procedures are available
+in the [Ubuntu installation guide](docs/UBUNTU.md).
