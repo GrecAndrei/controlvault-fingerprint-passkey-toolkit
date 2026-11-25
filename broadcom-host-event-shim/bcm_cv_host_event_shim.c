@@ -48,25 +48,47 @@ trace_status(const char *operation, int status)
                                 "BCM_CV: %s returned status=%d (0x%x)\n",
                                 operation, status, (unsigned) status);
   if (message_length > 0)
-    (void) write(STDERR_FILENO, message, (size_t) message_length);
+    {
+        ssize_t written = write(STDERR_FILENO, message, (size_t) message_length);
+        (void) written;
+      }
 }
 
 static void *
 resolve_cv_api_symbol(const char *name, void **cached)
 {
   pthread_mutex_lock(&cv_api_resolve_lock);
+
   if (*cached == NULL) {
     *cached = dlsym(RTLD_NEXT, name);
+
     if (*cached == NULL) {
-      void *driver = dlopen(
-          "/usr/lib/libfprint-2/tod-1/libfprint-2-tod-1-broadcom.so",
-          RTLD_LAZY | RTLD_NOLOAD);
-      if (driver != NULL)
-        *cached = dlsym(driver, name);
+      /* Known Broadcom TOD library locations across distributions. */
+      static const char *driver_paths[] = {
+        "/usr/lib/libfprint-2/tod-1/libfprint-2-tod-1-broadcom.so",
+        "/usr/lib/x86_64-linux-gnu/libfprint-2/tod-1/libfprint-2-tod-1-broadcom.so",
+        NULL
+      };
+
+      for (size_t i = 0; driver_paths[i] != NULL; i++) {
+        void *driver = dlopen(
+            driver_paths[i],
+            RTLD_LAZY | RTLD_NOLOAD);
+
+        if (driver != NULL) {
+          *cached = dlsym(driver, name);
+
+          if (*cached != NULL)
+            break;
+        }
+      }
     }
   }
+
   void *resolved = *cached;
+
   pthread_mutex_unlock(&cv_api_resolve_lock);
+
   return resolved;
 }
 
@@ -140,7 +162,10 @@ libusb_interrupt_transfer(libusb_device_handle *device, unsigned char endpoint,
         "BCM_CV: handled host timestamp interrupt, control status=%d\n",
         sync_status);
     if (message_length > 0)
-      (void) write(STDERR_FILENO, message, (size_t) message_length);
+      {
+        ssize_t written = write(STDERR_FILENO, message, (size_t) message_length);
+        (void) written;
+      }
     if (sync_status < 0)
       return sync_status;
   }
@@ -202,6 +227,9 @@ cvif_fingerprint_identify(void *template_handles, unsigned int template_count,
       status, (unsigned) status, template_count,
       match_result != NULL ? *match_result : 0U);
   if (message_length > 0)
-    (void) write(STDERR_FILENO, message, (size_t) message_length);
+    {
+        ssize_t written = write(STDERR_FILENO, message, (size_t) message_length);
+        (void) written;
+      }
   return status;
 }
